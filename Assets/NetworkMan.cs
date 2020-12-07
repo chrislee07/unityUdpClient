@@ -5,24 +5,35 @@ using System;
 using System.Text;
 using System.Net.Sockets;
 using System.Net;
+using System.Diagnostics;
+using System.Configuration;
 
 public class NetworkMan : MonoBehaviour
 {
     public UdpClient udp;
+    public GameObject playerObj;    //player object
+
+    public Dictionary<string, GameObject> currentPlayers;
+    public List<string> newPlayers;
+    public ListOfPlayers initialPlayers;
+    public string myAddy;
+    public Player myPlayer = new Player();
+
     // Start is called before the first frame update
     void Start()
     {
-        udp = new UdpClient();
+        newPlayers = new List<string>();
+        currentPlayers = new Dictionary<string, GameObject>();
+        initialPlayers = new ListOfPlayers();
         
-        udp.Connect("PUT_IP_ADDRESS_HERE",12345);
-
+        udp = new UdpClient();
+        udp.Connect("18.217.204.205", 12345);
         Byte[] sendBytes = Encoding.ASCII.GetBytes("connect");
-      
         udp.Send(sendBytes, sendBytes.Length);
-
         udp.BeginReceive(new AsyncCallback(OnReceived), udp);
 
-        InvokeRepeating("HeartBeat", 1, 1);
+        InvokeRepeating("HeartBeat", 1, 4);
+        InvokeRepeating("MovePlayer", 1, 2);
     }
 
     void OnDestroy(){
@@ -31,8 +42,10 @@ public class NetworkMan : MonoBehaviour
 
 
     public enum commands{
-        NEW_CLIENT,
-        UPDATE
+        NEW_CLIENT,             // 0
+        GAME_UPDATE,            // 1
+        PLAYER_DISCONNECTED,    // 2
+        LIST_OF_PLAYERS         // 3
     };
     
     [Serializable]
@@ -42,28 +55,35 @@ public class NetworkMan : MonoBehaviour
     
     [Serializable]
     public class Player{
-        [Serializable]
+        [Serializable] 
         public struct receivedColor{
             public float R;
             public float G;
             public float B;
         }
         public string id;
-        public receivedColor color;        
+        public Vector3 currPosition;
+        public receivedColor color;
     }
 
     [Serializable]
-    public class NewPlayer{
-        
+    public class ListOfPlayers{
+        public Player[] players;
+
+        public ListOfPlayers()
+        {
+            players = new Player[0];
+        }
     }
 
     [Serializable]
     public class GameState{
+        public int pktNum;
         public Player[] players;
     }
 
     public Message latestMessage;
-    public GameState lastestGameState;
+    public GameState latestGameState;
     void OnReceived(IAsyncResult result){
         // this is what had been passed into BeginReceive as the second parameter:
         UdpClient socket = result.AsyncState as UdpClient;
@@ -76,38 +96,88 @@ public class NetworkMan : MonoBehaviour
         
         // do what you'd like with `message` here:
         string returnData = Encoding.ASCII.GetString(message);
-        Debug.Log("Got this: " + returnData);
+        UnityEngine.Debug.Log("Got this: " + returnData);
         
         latestMessage = JsonUtility.FromJson<Message>(returnData);
         try{
             switch(latestMessage.cmd){
                 case commands.NEW_CLIENT:
+                    ListOfPlayers newestPlayer = JsonUtility.FromJson<ListOfPlayers>(returnData);
+                    foreach(Player player in newestPlayer.players)
+                    {
+                        newPlayers.Add(player.id);
+                        myAddy = player.id;
+                    }
                     break;
-                case commands.UPDATE:
-                    lastestGameState = JsonUtility.FromJson<GameState>(returnData);
+                case commands.GAME_UPDATE:
+                    latestGameState = JsonUtility.FromJson<GameState>(returnData);
+                    UnityEngine.Debug.Log("latestGameState" + returnData);
+                    break;
+                case commands.PLAYER_DISCONNECTED:
+                    DestroyPlayers(returnData);
+                    break;
+                case commands.LIST_OF_PLAYERS:
+                    initialPlayers = JsonUtility.FromJson<ListOfPlayers>(returnData);
                     break;
                 default:
-                    Debug.Log("Error");
+                    UnityEngine.Debug.Log("Error");
                     break;
             }
         }
         catch (Exception e){
-            Debug.Log(e.ToString());
+            UnityEngine.Debug.Log(e.ToString());
         }
         
         // schedule the next receive operation once reading is done:
         socket.BeginReceive(new AsyncCallback(OnReceived), socket);
     }
 
-    void SpawnPlayers(){
+    void SpawnPlayers()
+    {
+        if (newPlayers.Count > 0)
+        {
+            foreach (string playerID in newPlayers)
+            {
+                currentPlayers.Add(playerID,Instantiate(playerObj, new Vector3(1, 0, 0), Quaternion.identity));
+                currentPlayers[playerID].name = playerID;
+                myPlayer.currPosition = currentPlayers[playerID].transform.position;
+                UnityEngine.Debug.Log("Connected to server, Position: " + currentPlayers[playerID].transform.position);
+            }
+            newPlayers.Clear();
+        }
+        if (initialPlayers.players.Length > 0)
+        {
+            //UnityEngine.Debug.Log(initialPlayers.players);
+            foreach(Player player in initialPlayers.players)
+            {
+                if (player.id == myAddy)
+                    continue;
+                currentPlayers.Add(player.id, Instantiate(playerObj, new Vector3(0, 1, 0), Quaternion.identity));
+                currentPlayers[player.id].name = player.id;
+            }
+            initialPlayers.players = new Player[0];
+        }
+    }
+
+    void UpdatePlayers()
+    {
+        if(latestGameState.players.Length > 0)
+        {
+            foreach (NetworkMan.Player player in latestGameState.players)
+            {
+                string playerID = player.id;
+                myPlayer.currPosition = currentPlayers[myAddy].GetComponent<Transform>().position;
+                //currentPlayers[playerID].GetComponent<Transform>().position = new Vector3(player.currPosition.x, player.currPosition.y, player.currPosition.z);
+                UnityEngine.Debug.Log(playerID + " position : " + currentPlayers[playerID].transform.position);
+            }
+            latestGameState.players = new Player[0];
+        }
 
     }
 
-    void UpdatePlayers(){
-
-    }
-
-    void DestroyPlayers(){
+    void DestroyPlayers(string disPlayer)
+    {
+        UnityEngine.Debug.Log("Disconnected Player: " + disPlayer);
 
     }
     
@@ -116,9 +186,17 @@ public class NetworkMan : MonoBehaviour
         udp.Send(sendBytes, sendBytes.Length);
     }
 
+    void MovePlayer()
+    {
+        string playerPos = JsonUtility.ToJson(myPlayer);
+        Byte[] sendBytes = Encoding.ASCII.GetBytes(playerPos);
+        udp.Send(sendBytes, sendBytes.Length);
+    }
+
     void Update(){
         SpawnPlayers();
         UpdatePlayers();
-        DestroyPlayers();
+        //DestroyPlayers();
+        //MovePlayer();
     }
 }
